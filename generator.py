@@ -2,6 +2,30 @@ import argparse
 import os
 import random
 
+class Board:
+    def __init__(self, filename):
+        self.filename = filename
+        self.board = []
+        self.rows = 0
+        self.cols = 0
+        self.num_mines = 0
+        #state trackers
+        self.revealed = set()
+        self.flagged = set()
+        self.load_board()
+
+    def load_board(self):
+        with open(self.filename, 'r') as f:
+            header = f.readline().strip().split()
+            self.rows, self.cols, self.num_mines = map(int, header)
+            for line in f:
+                row = []
+                for val in line.strip().split():
+                    row.append('*' if val == '*' else int(val))
+                self.board.append(row)
+    
+
+
 def generate_board(rows, cols, num_mines):
     max_mines = rows * cols - 1
     num_mines = min(num_mines, max_mines)
