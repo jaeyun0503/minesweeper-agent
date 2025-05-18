@@ -120,6 +120,9 @@ def interactive_loop(board):
         except ValueError:
             print("Row and column must be integers.")
             continue
+        if not (0 <= r < board.rows and 0 <= c < board.cols):
+            print(f"Coordinates ({r}, {c}) out of bounds. Please enter 0 ≤ row < {board.rows}, 0 ≤ col < {board.cols}.")
+            continue
 
         result = board.apply_move(action, (r, c))
         if result == 'hit_mine':
@@ -149,7 +152,7 @@ def run(filename):
     # reveal one random safe tile
     safe_tiles = [(r, c) for r in range(board.rows)
                   for c in range(board.cols)
-                  if not board.is_mine(r, c)]
+                  if not board.is_mine(r, c) and board.board[r][c] == 0]
     if safe_tiles:
         first = random.choice(safe_tiles)
         board.reveal(*first)
