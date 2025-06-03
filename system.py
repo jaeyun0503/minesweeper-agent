@@ -1,5 +1,6 @@
-import ast
 import random
+import time
+import itertools
 
 class Board:
     def __init__(self, filename):
@@ -8,7 +9,6 @@ class Board:
         self.rows = 0
         self.cols = 0
         self.num_mines = 0
-        # state trackers
         self.revealed = set()
         self.flagged = set()
         self.load_board()
@@ -20,35 +20,29 @@ class Board:
                 raise ValueError("First line must be: rows cols num_mines")
             self.rows, self.cols, self.num_mines = map(int, header)
             for line in f:
-                line = line.strip()
-                if not line:
+                parts = line.strip().split()
+                if not parts:
                     continue
-                parts = line.split()
                 if len(parts) != self.cols:
-                    raise ValueError(f"Expected {self.cols} columns per row, got {len(parts)}")
-                row = [('*' if val == '*' else int(val)) for val in parts]
+                    raise ValueError(f"Expected {self.cols} cols, got {len(parts)}")
+                row = [('*' if v == '*' else int(v)) for v in parts]
                 self.board.append(row)
-            if len(self.board) != self.rows:
-                raise ValueError(f"Expected {self.rows} rows, got {len(self.board)}")
+        if len(self.board) != self.rows:
+            raise ValueError(f"Expected {self.rows} rows, got {len(self.board)}")
 
     def print_board(self, reveal_all=False):
-        # Display column indices
-        print("Current Board State:")
-        # Header: column numbers
         header = '   ' + ' '.join(f"{c:>2}" for c in range(self.cols))
         print(header)
         for r in range(self.rows):
-            row_repr = []
+            row = []
             for c in range(self.cols):
                 if reveal_all or (r, c) in self.revealed:
-                    cell_str = str(self.board[r][c]).rjust(2)
+                    row.append(str(self.board[r][c]).rjust(2))
                 elif (r, c) in self.flagged:
-                    cell_str = 'F'.rjust(2)
+                    row.append('F'.rjust(2))
                 else:
-                    cell_str = '?'.rjust(2)
-                row_repr.append(cell_str)
-            # Prefix row index
-            print(str(r).rjust(2) + ' ' + ' '.join(row_repr))
+                    row.append('?'.rjust(2))
+            print(str(r).rjust(2), ' '.join(row))
 
     def reveal(self, r, c):
         if (r, c) in self.revealed or (r, c) in self.flagged:
@@ -60,105 +54,199 @@ class Board:
         if (r, c) not in self.revealed:
             self.flagged.add((r, c))
 
-    def unflag(self, r, c):
-        self.flagged.discard((r, c))
-
-    def is_mine(self, r, c):
-        return self.board[r][c] == '*'
-
-    def get_neighbors(self, r, c):
-        directions = [(-1, -1), (-1, 0), (-1, 1),
-                      (0, -1),           (0, 1),
-                      (1, -1),  (1, 0),  (1, 1)]
-        neighbors = []
-        for dr, dc in directions:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < self.rows and 0 <= nc < self.cols:
-                neighbors.append((nr, nc))
-        return neighbors
-
-    def apply_move(self, action, coords):
-        r, c = coords
-        if action == 'F':
-            self.flag(r, c)
-            return 'flagged'
-        elif action == 'U':
-            self.unflag(r, c)
-            return 'unflagged'
-        elif action == 'R':
+    def apply_move(self, action, r, c):
+        if action == 'R':
             if (r, c) in self.flagged:
                 return 'flagged_cell'
-            result = self.reveal(r, c)
-            if result is None:
+            res = self.reveal(r, c)
+            if res is None:
                 return 'already_revealed'
-            if result == '*':
+            if res == '*':
                 return 'hit_mine'
-            return result
+            return res
+        elif action == 'F':
+            self.flag(r, c)
+            return 'flagged'
         else:
-            return 'invalid_action'
+            return 'invalid'
 
     def is_solved(self):
-        total_cells = self.rows * self.cols
-        return len(self.revealed) == total_cells - self.num_mines
+        return len(self.revealed) == self.rows * self.cols - self.num_mines
 
+class MinesweeperAgent:
+    def __init__(self, state):
+        self.state = [row[:] for row in state]
+        self.rows = len(state)
+        self.cols = len(state[0])
 
-def interactive_loop(board):
-    """
-    Run an interactive Minesweeper session on the given Board.
-    """
+    def neighbors(self, r, c):
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                    yield nr, nc
+
+    def propagate(self):
+        new_safe, new_mines = set(), set()
+        for r in range(self.rows):
+            for c in range(self.cols):
+                v = self.state[r][c]
+                if isinstance(v, int) and 0 <= v <= 8:
+                    covered, flagged = [], 0
+                    for nr, nc in self.neighbors(r, c):
+                        if self.state[nr][nc] == 9:
+                            covered.append((nr, nc))
+                        elif self.state[nr][nc] == 10:
+                            flagged += 1
+                    rem = v - flagged
+                    if rem == 0 and covered:
+                        new_safe.update(covered)
+                    if rem == len(covered) and rem > 0:
+                        new_mines.update(covered)
+        for (r, c) in new_safe:
+            if self.state[r][c] == 9:
+                self.state[r][c] = 'S'
+        for (r, c) in new_mines:
+            if self.state[r][c] == 9:
+                self.state[r][c] = 10
+        return new_safe, new_mines
+
+    def get_forced_actions(self):
+        actions = []
+        while True:
+            safe, mines = self.propagate()
+            if not safe and not mines:
+                break
+            for c in mines:
+                actions.append(('F', c[0], c[1], 'forced'))
+            for c in safe:
+                actions.append(('R', c[0], c[1], 'forced'))
+        return actions
+
+    def estimate_probabilities(self):
+        constraints, frontier = [], set()
+        for r in range(self.rows):
+            for c in range(self.cols):
+                v = self.state[r][c]
+                if isinstance(v, int) and 0 <= v <= 8:
+                    covered, flagged = [], 0
+                    for nr, nc in self.neighbors(r, c):
+                        if self.state[nr][nc] == 9:
+                            covered.append((nr, nc))
+                        elif self.state[nr][nc] == 10:
+                            flagged += 1
+                    if covered:
+                        frontier.update(covered)
+                        constraints.append((covered, v - flagged))
+        frontier = list(frontier)
+        n = len(frontier)
+        if n > 20:
+            raise NotImplementedError
+        counts = {cell: 0 for cell in frontier}
+        total = 0
+        for bits in itertools.product([0, 1], repeat=n):
+            assign = dict(zip(frontier, bits))
+            if all(sum(assign[cell] for cell in cells) == req for cells, req in constraints):
+                total += 1
+                for cell, val in assign.items():
+                    counts[cell] += val
+        return {cell: (counts[cell] / total if total else 0) for cell in frontier}
+
+    def next_move(self):
+        # 1) forced moves
+        forced = self.get_forced_actions()
+        if forced:
+            return forced
+        # 2) probability-based with random tie-break
+        try:
+            probs = self.estimate_probabilities()
+        except NotImplementedError:
+            probs = {}
+        # certain flags
+        for cell, p in probs.items():
+            if p == 1.0:
+                return [('F', cell[0], cell[1], f'prob={p:.2f}')]
+        if probs:
+            # pick all with minimal probability
+            min_p = min(probs.values())
+            best_cells = [cell for cell, p in probs.items() if p == min_p]
+            choice = random.choice(best_cells)
+            return [('R', choice[0], choice[1], f'prob={min_p:.2f} (tie-break)')]
+        # 3) fallback random
+        covered = [(r, c) for r in range(self.rows) for c in range(self.cols) if self.state[r][c] == 9]
+        if covered:
+            choice = random.choice(covered)
+            return [('R', choice[0], choice[1], 'random_guess')]
+        return []
+
+def get_csp_state(board):
+    state = []
+    for r in range(board.rows):
+        row = []
+        for c in range(board.cols):
+            if (r, c) in board.flagged:
+                row.append(10)
+            elif (r, c) in board.revealed:
+                v = board.board[r][c]
+                row.append(v if isinstance(v, int) else 9)
+            else:
+                row.append(9)
+        state.append(row)
+    return state
+
+def solve_ai(board):
+    move_count = 0
+    print("AI solving...\n")
+    while not board.is_solved():
+        actions = MinesweeperAgent(get_csp_state(board)).next_move()
+        if not actions:
+            print("No moves available, stopping.\n")
+            break
+        for act, r, c, reason in actions:
+            move_count += 1
+            print(f"=== AI Move {move_count} ===")
+            print(f"Action: {act} at ({r}, {c}),  Reason: {reason}")
+            res = board.apply_move(act, r, c)
+            print(f"Result: {res}\n")
+            print("Board after move:")
+            board.print_board()
+            print()
+            # time.sleep(1)
+            if res == 'hit_mine':
+                print("AI hit a mine. Game over.\n")
+                print(f"Total moves: {move_count}\n")
+                return
+    if board.is_solved():
+        print("AI solved the board!\n")
+        print(f"Total moves: {move_count}\n")
+
+def manual_loop(board):
     while True:
         board.print_board()
-        move_input = input("Enter move (e.g., 'R 3 4' or 'F 4 5'): ")
-        tokens = move_input.strip().split()
-        if len(tokens) != 3:
-            print("Invalid input. Format must be: ACTION row col")
+        inp = input("Enter move ('R row col' or 'F row col'): ").split()
+        if len(inp) != 3:
+            print("Invalid input.\n")
             continue
-        action, r_str, c_str = tokens
-        action = action.upper()
-        try:
-            r, c = int(r_str), int(c_str)
-        except ValueError:
-            print("Row and column must be integers.")
-            continue
-        if not (0 <= r < board.rows and 0 <= c < board.cols):
-            print(f"Coordinates ({r}, {c}) out of bounds. Please enter 0 ≤ row < {board.rows}, 0 ≤ col < {board.cols}.")
-            continue
-
-        result = board.apply_move(action, (r, c))
-        if result == 'hit_mine':
-            board.print_board(reveal_all=True)
-            print(f"GAME OVER! You hit a mine at {(r, c)}.")
-            break
-        elif result == 'already_revealed':
-            print(f"Cell {(r, c)} is already revealed.")
-        elif result == 'flagged_cell':
-            print(f"Cell {(r, c)} is flagged. Unflag before revealing.")
-        elif result == 'invalid_action':
-            print(f"Invalid action '{action}'. Use 'F', 'U', or 'R'.")
-        else:
-            print(f"Move result at {(r, c)}: {result}")
-
+        act, r, c = inp[0].upper(), int(inp[1]), int(inp[2])
+        print(f"You chose: {act} at ({r}, {c})\n")
+        res = board.apply_move(act, r, c)
+        print(f"Result: {res}\n")
+        if res == 'hit_mine':
+            print("You hit a mine. Game over.\n")
+            return
         if board.is_solved():
-            board.print_board(reveal_all=True)
-            print("Congratulations! You cleared all non-mine cells!")
-            break
-
-
-def run(filename):
-    """
-    Load a board from the given filename, reveal one random safe tile, and start the interactive loop.
-    """
-    board = Board(filename)
-    # reveal one random safe tile
-    safe_tiles = [(r, c) for r in range(board.rows)
-                  for c in range(board.cols)
-                  if not board.is_mine(r, c) and board.board[r][c] == 0]
-    if safe_tiles:
-        first = random.choice(safe_tiles)
-        board.reveal(*first)
-        print(f"First move: revealed a safe tile at {first}.")
-    interactive_loop(board)
+            print("You solved the board!\n")
+            return
 
 if __name__ == '__main__':
-    fname = input("Enter board filename: ")
-    run(fname)
+    fn = input("Enter board filename: ")
+    b = Board(fn)
+    mode = input("Choose mode: (M)anual or (A)I solve: ").strip().upper()
+    if mode == 'M':
+        manual_loop(b)
+    elif mode == 'A':
+        solve_ai(b)
+    else:
+        print("Unknown mode.\n")
