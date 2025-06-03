@@ -29,6 +29,9 @@ class Board:
                 self.board.append(row)
         if len(self.board) != self.rows:
             raise ValueError(f"Expected {self.rows} rows, got {len(self.board)}")
+        
+    def is_mine(self, r, c):
+        return self.board[r][c] == '*'
 
     def print_board(self, reveal_all=False):
         header = '   ' + ' '.join(f"{c:>2}" for c in range(self.cols))
@@ -243,10 +246,20 @@ def manual_loop(board):
 if __name__ == '__main__':
     fn = input("Enter board filename: ")
     b = Board(fn)
+    safe_tiles = [(r, c) for r in range(b.rows)
+                  for c in range(b.cols)
+                  if not b.is_mine(r, c) and b.board[r][c] == 0]
+    
     mode = input("Choose mode: (M)anual or (A)I solve: ").strip().upper()
     if mode == 'M':
+        first = random.choice(safe_tiles)
+        b.reveal(*first)
+        print(f"First move: revealed a safe tile at {first}.")
         manual_loop(b)
     elif mode == 'A':
+        first = random.choice(safe_tiles)
+        b.reveal(*first)
+        print(f"First move: revealed a safe tile at {first}.")
         solve_ai(b)
     else:
         print("Unknown mode.\n")
