@@ -29,9 +29,6 @@ class Board:
                 self.board.append(row)
         if len(self.board) != self.rows:
             raise ValueError(f"Expected {self.rows} rows, got {len(self.board)}")
-        
-    def is_mine(self, r, c):
-        return self.board[r][c] == '*'
 
     def print_board(self, reveal_all=False):
         header = '   ' + ' '.join(f"{c:>2}" for c in range(self.cols))
@@ -77,6 +74,9 @@ class Board:
         return len(self.revealed) == self.rows * self.cols - self.num_mines
 
 class MinesweeperAgent:
+    COVERED = 9
+    FLAGGED = 10
+
     def __init__(self, state):
         self.state = [row[:] for row in state]
         self.rows = len(state)
@@ -99,9 +99,9 @@ class MinesweeperAgent:
                 if isinstance(v, int) and 0 <= v <= 8:
                     covered, flagged = [], 0
                     for nr, nc in self.neighbors(r, c):
-                        if self.state[nr][nc] == 9:
+                        if self.state[nr][nc] == self.COVERED:
                             covered.append((nr, nc))
-                        elif self.state[nr][nc] == 10:
+                        elif self.state[nr][nc] == self.FLAGGED:
                             flagged += 1
                     rem = v - flagged
                     if rem == 0 and covered:
@@ -109,11 +109,11 @@ class MinesweeperAgent:
                     if rem == len(covered) and rem > 0:
                         new_mines.update(covered)
         for (r, c) in new_safe:
-            if self.state[r][c] == 9:
+            if self.state[r][c] == self.COVERED:
                 self.state[r][c] = 'S'
         for (r, c) in new_mines:
-            if self.state[r][c] == 9:
-                self.state[r][c] = 10
+            if self.state[r][c] == self.COVERED:
+                self.state[r][c] = self.FLAGGED
         return new_safe, new_mines
 
     def get_forced_actions(self):
@@ -123,9 +123,9 @@ class MinesweeperAgent:
             if not safe and not mines:
                 break
             for c in mines:
-                actions.append(('F', c[0], c[1], 'forced'))
+                actions.append(('F', c[0], c[1], 'forced flag'))
             for c in safe:
-                actions.append(('R', c[0], c[1], 'forced'))
+                actions.append(('R', c[0], c[1], 'forced reveal'))
         return actions
 
     def estimate_probabilities(self):
@@ -136,9 +136,9 @@ class MinesweeperAgent:
                 if isinstance(v, int) and 0 <= v <= 8:
                     covered, flagged = [], 0
                     for nr, nc in self.neighbors(r, c):
-                        if self.state[nr][nc] == 9:
+                        if self.state[nr][nc] == self.COVERED:
                             covered.append((nr, nc))
-                        elif self.state[nr][nc] == 10:
+                        elif self.state[nr][nc] == self.FLAGGED:
                             flagged += 1
                     if covered:
                         frontier.update(covered)
@@ -157,32 +157,107 @@ class MinesweeperAgent:
                     counts[cell] += val
         return {cell: (counts[cell] / total if total else 0) for cell in frontier}
 
+    # ------------------ New Assumption-based Inference ------------------
+    def number_of_assumptions(self, unopened, mines_left):
+        from math import comb
+        return comb(unopened, mines_left)
+
+    def combine(self, cells, board):
+        prio = {}
+        for cell in cells:
+            unopened, mines_left = self.get_bomb_left(cell[0], cell[1])
+            combos = self.number_of_assumptions(unopened, mines_left)
+            if combos <= 10:
+                prio[cell] = combos
+        return prio or None
+
+    def get_bomb_left(self, r, c):
+        unopened = 0
+        flagged = 0
+        for nr, nc in self.neighbors(r, c):
+            if self.state[nr][nc] == self.COVERED:
+                unopened += 1
+            elif self.state[nr][nc] == self.FLAGGED:
+                flagged += 1
+        mines_left = self.state[r][c] - flagged
+        return unopened, mines_left
+
+    def assumption_actions(self):
+        # Pick a number cell with small combination of its covered neighbors
+        from math import comb
+        candidates = {}
+        # Gather numeric clue cells adjacent to covered cells
+        for r in range(self.rows):
+            for c in range(self.cols):
+                v = self.state[r][c]
+                if isinstance(v, int) and 0 <= v <= 8:
+                    covered = []
+                    flagged = 0
+                    for nr, nc in self.neighbors(r, c):
+                        if self.state[nr][nc] == self.COVERED:
+                            covered.append((nr, nc))
+                        elif self.state[nr][nc] == self.FLAGGED:
+                            flagged += 1
+                    mines_left = v - flagged
+                    unopened = len(covered)
+                    if 0 < mines_left <= unopened:
+                        try:
+                            combos = comb(unopened, mines_left)
+                        except ValueError:
+                            continue
+                        if combos <= 10:
+                            candidates[(r, c)] = (combos, covered, mines_left)
+        if not candidates:
+            return []
+        # Choose the clue cell with fewest possibilities
+        cell, (combos, covered, mines_left) = min(candidates.items(), key=lambda kv: kv[1][0])
+        # Generate patterns of mines (-1) vs safe (0)
+        patterns = [bits for bits in itertools.product([-1, 0], repeat=len(covered))
+                    if sum(1 for b in bits if b == -1) == mines_left]
+        # Aggregate neighbor outcomes
+        counts = {nbr: [] for nbr in covered}
+        for pat in patterns:
+            for val, nbr in zip(pat, covered):
+                counts[nbr].append(val)
+        # Propose actions where all patterns agree
+        actions = []
+        for nbr, vals in counts.items():
+            if all(v == -1 for v in vals):
+                actions.append(('F', nbr[0], nbr[1], 'assume'))
+            if all(v == 0 for v in vals):
+                actions.append(('R', nbr[0], nbr[1], 'assume'))
+        # Filter out any on non-covered
+        filtered = [(act, r, c, reason)
+                    for act, r, c, reason in actions
+                    if self.state[r][c] == self.COVERED]
+        return filtered
+
     def next_move(self):
-        # 1) forced moves
         forced = self.get_forced_actions()
         if forced:
             return forced
-        # 2) probability-based with random tie-break
         try:
             probs = self.estimate_probabilities()
         except NotImplementedError:
             probs = {}
-        # certain flags
         for cell, p in probs.items():
             if p == 1.0:
                 return [('F', cell[0], cell[1], f'prob={p:.2f}')]
         if probs:
-            # pick all with minimal probability
             min_p = min(probs.values())
-            best_cells = [cell for cell, p in probs.items() if p == min_p]
-            choice = random.choice(best_cells)
-            return [('R', choice[0], choice[1], f'prob={min_p:.2f} (tie-break)')]
-        # 3) fallback random
-        covered = [(r, c) for r in range(self.rows) for c in range(self.cols) if self.state[r][c] == 9]
+            best = [c for c, p in probs.items() if p == min_p]
+            choice = random.choice(best)
+            return [('R', choice[0], choice[1], f'prob={min_p:.2f}')]
+        assume = self.assumption_actions()
+        if assume:
+            return assume
+        covered = [(r, c) for r in range(self.rows) for c in range(self.cols)
+                   if self.state[r][c] == self.COVERED]
         if covered:
             choice = random.choice(covered)
-            return [('R', choice[0], choice[1], 'random_guess')]
+            return [('R', choice[0], choice[1], 'random')]
         return []
+
 
 def get_csp_state(board):
     state = []
@@ -190,58 +265,82 @@ def get_csp_state(board):
         row = []
         for c in range(board.cols):
             if (r, c) in board.flagged:
-                row.append(10)
+                row.append(MinesweeperAgent.FLAGGED)
             elif (r, c) in board.revealed:
                 v = board.board[r][c]
-                row.append(v if isinstance(v, int) else 9)
+                row.append(v if isinstance(v, int) else MinesweeperAgent.COVERED)
             else:
-                row.append(9)
+                row.append(MinesweeperAgent.COVERED)
         state.append(row)
     return state
 
+
 def solve_ai(board):
+    import random as _rand, copy as _copy
+    # Simulate pure-random playouts to estimate safety of a guess
+
+    def monte_carlo_select(original_board, covered, trials=5):
+        best_cell = None
+        best_score = -1
+        for cell in covered:
+            wins = 0
+            for _ in range(trials):
+                b = Board(original_board.filename)
+                b.revealed = set(original_board.revealed)
+                b.flagged = set(original_board.flagged)
+                # first move
+                res = b.apply_move('R', cell[0], cell[1])
+                if res == 'hit_mine':
+                    continue
+                # random playout
+                while not b.is_solved():
+                    all_cov = [(r, c) for r in range(b.rows) for c in range(b.cols)
+                               if (r, c) not in b.revealed and (r, c) not in b.flagged]
+                    if not all_cov:
+                        break
+                    pick = _rand.choice(all_cov)
+                    res2 = b.apply_move('R', pick[0], pick[1])
+                    if res2 == 'hit_mine':
+                        break
+                else:
+                    wins += 1
+            if wins > best_score:
+                best_score = wins
+                best_cell = cell
+        return best_cell
+
     move_count = 0
-    print("AI solving...\n")
+    print("AI solving...")
     while not board.is_solved():
-        actions = MinesweeperAgent(get_csp_state(board)).next_move()
+        state = get_csp_state(board)
+        actions = MinesweeperAgent(state).next_move()
+        # intercept pure random guess and improve via Monte Carlo
+        if len(actions) == 1 and actions[0][3] == 'random':
+            covered = [(r, c) for r in range(board.rows) for c in range(board.cols)
+                       if (r, c) not in board.revealed and (r, c) not in board.flagged]
+            choice = monte_carlo_select(board, covered, trials=5)
+            actions = [('R', choice[0], choice[1], 'monte_carlo')]
         if not actions:
-            print("No moves available, stopping.\n")
+            print("No moves available, stopping.")
             break
         for act, r, c, reason in actions:
             move_count += 1
-            print(f"=== AI Move {move_count} ===")
-            print(f"Action: {act} at ({r}, {c}),  Reason: {reason}")
+            # print(f"=== AI Move {move_count} ===")
+            # print(f"Action: {act} at ({r}, {c}),  Reason: {reason}")
             res = board.apply_move(act, r, c)
-            print(f"Result: {res}\n")
-            print("Board after move:")
-            board.print_board()
-            print()
-            # time.sleep(1)
+            # print(f"Result: {res}")
+            # print("Board after move:")
+            # board.print_board()
+            # print()
+            # time.sleep(.2)
             if res == 'hit_mine':
-                print("AI hit a mine. Game over.\n")
-                print(f"Total moves: {move_count}\n")
+                # print("AI hit a mine. Game over.")
+                # print(f"Total moves: {move_count}")
                 return
     if board.is_solved():
-        print("AI solved the board!\n")
-        print(f"Total moves: {move_count}\n")
-
-def manual_loop(board):
-    while True:
-        board.print_board()
-        inp = input("Enter move ('R row col' or 'F row col'): ").split()
-        if len(inp) != 3:
-            print("Invalid input.\n")
-            continue
-        act, r, c = inp[0].upper(), int(inp[1]), int(inp[2])
-        print(f"You chose: {act} at ({r}, {c})\n")
-        res = board.apply_move(act, r, c)
-        print(f"Result: {res}\n")
-        if res == 'hit_mine':
-            print("You hit a mine. Game over.\n")
-            return
-        if board.is_solved():
-            print("You solved the board!\n")
-            return
+        # print("AI solved the board!")
+        # print(f"Total moves: {move_count}")
+        return
 
 if __name__ == '__main__':
     fn = input("Enter board filename: ")
@@ -249,13 +348,11 @@ if __name__ == '__main__':
     safe_tiles = [(r, c) for r in range(b.rows)
                   for c in range(b.cols)
                   if not b.is_mine(r, c) and b.board[r][c] == 0]
-    
     mode = input("Choose mode: (M)anual or (A)I solve: ").strip().upper()
     if mode == 'M':
         first = random.choice(safe_tiles)
         b.reveal(*first)
         print(f"First move: revealed a safe tile at {first}.")
-        manual_loop(b)
     elif mode == 'A':
         first = random.choice(safe_tiles)
         b.reveal(*first)
